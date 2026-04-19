@@ -1,31 +1,17 @@
-'''
-map_visualization.py
-
-Combines CSP map-coloring logic (backtracking, forward checking, singleton
-propagation, MRV/Degree/LCV heuristics) with geographic map rendering via
-GeoPandas / Matplotlib.
-
-Running this file directly will:
-  1. Compute the chromatic number for the USA and Australia maps.
-  2. Run 5-trial experiments for all six algorithm/heuristic combinations.
-  3. Render colored GeoPandas maps for both regions.
-'''
-
-import time
-import random
+import time, random, sys
+from collections import defaultdict
 
 import pandas as pd
 import seaborn as sns
 import geopandas as gpd
+
 import matplotlib.pyplot as plt
 
 
-# ─────────────────────────────────────────────
-#  Map definitions
-# ─────────────────────────────────────────────
-
-# USA: 48 contiguous states + DC  (territories omitted)
+# MAP DEFINITIONS
+# USA: dictionary of adjacent regions for the 50 states + DC 
 USA_NEIGHBORS = {
+    "AK": [],
     "AL": ["FL","GA","MS","TN"],
     "AZ": ["CA","CO","NM","NV","UT"],
     "AR": ["LA","MO","MS","OK","TN","TX"],
@@ -36,6 +22,7 @@ USA_NEIGHBORS = {
     "DC": ["MD","VA"],
     "FL": ["AL","GA"],
     "GA": ["AL","FL","NC","SC","TN"],
+    "HI": [],
     "ID": ["MT","NV","OR","UT","WA","WY"],
     "IL": ["IN","IA","KY","MO","WI"],
     "IN": ["IL","KY","MI","OH"],
@@ -74,21 +61,21 @@ USA_NEIGHBORS = {
     "WA": ["ID","OR"],
     "WV": ["KY","MD","OH","PA","VA"],
     "WI": ["IL","IA","MI","MN"],
-    "WY": ["CO","ID","MT","NE","SD","UT"],
+    "WY": ["CO","ID","MT","NE","SD","UT"]
 }
 
-# Australia: 7 states/territories (ACT omitted per project scope)
+# Australia: dictionary of regions states for the 7 states
 AU_NEIGHBORS = {
     "WA":  ["NT","SA"],
     "NT":  ["WA","SA","QLD"],
     "SA":  ["WA","NT","QLD","NSW","VIC"],
     "QLD": ["NT","SA","NSW"],
     "NSW": ["SA","QLD","VIC"],
-    "VIC": ["SA","NSW","TAS"],
-    "TAS": ["VIC"],
+    "VIC": ["SA","NSW",],
+    "TAS": [],
 }
 
-# Maps color-number strings ("1", "2", …) to real display colors
+# Maps color-number strings to real display colors for visualization
 COLOR_PALETTE = {
     "1": "#E63946",   # red
     "2": "#457B9D",   # blue
@@ -97,6 +84,7 @@ COLOR_PALETTE = {
     "5": "#F4A261",   # orange
 }
 
+# Maps AU abbreviations to the name sused in the shape files for visualization
 AU_ABBR_TO_NAME = {
     "NSW": "New South Wales",
     "VIC": "Victoria",
@@ -108,20 +96,18 @@ AU_ABBR_TO_NAME = {
 }
 
 
-# ─────────────────────────────────────────────
-#  GeoPandas visualization helpers
-# ─────────────────────────────────────────────
 
+# VISUALIZATION HELPERS
+# Used to reposition AK and HI for visualization
 def translate_geometries(df, x, y, scale, rotate):
     '''
-    Translate, scale, and rotate geometries — used to reposition
-    Alaska and Hawaii onto the contiguous US frame.
+    Translate, scale, and rotate geometries.
 
     :param df: GeoDataFrame to transform
     :param x: x-axis translation offset
     :param y: y-axis translation offset
-    :param scale: uniform scale factor
-    :param rotate: rotation angle in degrees
+    :param scale: scale factor
+    :param rotate: rotation angle (degrees)
     '''
     df.loc[:, "geometry"] = df.geometry.translate(yoff=y, xoff=x)
     center = df.dissolve().centroid.iloc[0]
@@ -132,8 +118,8 @@ def translate_geometries(df, x, y, scale, rotate):
 
 def adjust_us_map(df):
     '''
-    Reposition Alaska and Hawaii into inset positions below the
-    contiguous states so the full map fits in one frame.
+    Reposition Alaska and Hawaii into position below the
+    contiguous 48 states so the full map fits in one frame.
 
     :param df: GeoDataFrame for the full US
     '''
@@ -149,12 +135,11 @@ def adjust_us_map(df):
 
 def plot_map(region="us", coloring=None):
     '''
-    Render a colored geographic map using GeoPandas.
+    Render a colored map
 
     :param region: "us" or "au"
-    :param coloring: dict mapping region abbreviation → hex color string,
+    :param coloring: dict mapping region abbreviationto hex color string,
                      e.g. {"CA": "#E63946", "TX": "#457B9D"}
-                     Unmapped regions are shown in light grey.
     '''
     edge_color       = "#30011E"
     background_color = "#fafafa"
@@ -165,38 +150,41 @@ def plot_map(region="us", coloring=None):
         "axes.facecolor":   background_color,
     })
 
+    # Sets appropriate variables and gets data for given region
     if region == "us":
         gdf = gpd.read_file("./map_data/us/")
-        gdf = gdf[~gdf.STATEFP.isin(["72", "69", "60", "66", "78"])]
         gdf = gdf.to_crs("ESRI:102003")
-        gdf = adjust_us_map(gdf)
-        key_col = "STUSPS"          # e.g. CA, TX, NY
+        key_col = "STUSPS"         
+        
+        # Remove US territories from map
+        gdf = gdf[~gdf.STATEFP.isin(["72", "69", "60", "66", "78"])]
+        gdf = adjust_us_map(gdf) # Move AK+HI
+
 
     elif region == "au":
         gdf = gpd.read_file("./map_data/au/")
         gdf = gdf.to_crs("EPSG:3577")
         key_col = "STE_NAME21"
 
-        # Remove non-mainland entries
+        # Remove AU territories from map
         gdf = gdf[~gdf[key_col].isin(
             ["Other Territories", "Outside Australia", "Australian Capital Territory"]
         )]
 
-        # Convert abbreviation keys → full state names
+        # Convert abbreviation keys to the full state names used in the shapefile
         if coloring:
             coloring = {AU_ABBR_TO_NAME.get(k, k): v for k, v in coloring.items()}
-
-        print(set(gdf[key_col]))
 
     else:
         raise ValueError("region must be 'us' or 'au'")
 
-    # Apply colors; fall back to grey for any uncolored region
+    # Apply colors to regions; fall back to grey for any uncolored region
     if coloring:
         gdf["plot_color"] = gdf[key_col].map(coloring).fillna("#dddddd")
     else:
         gdf["plot_color"] = "#dddddd"
 
+    # Plotting each region with the defined color
     ax = gdf.plot(
         edgecolor=edge_color,
         color=gdf["plot_color"],
@@ -205,27 +193,29 @@ def plot_map(region="us", coloring=None):
 
     plt.axis("off")
     plt.title(f"{region.upper()} Map Coloring", fontsize=14)
-    plt.show()
+    
+    filename = f"{region}_map.png"
+    plt.savefig(filename, bbox_inches="tight", dpi=300)
+    plt.close()
 
 
 def assignment_to_hex_coloring(assignment):
     '''
-    Convert a CSP assignment dict (region → color-number string) into a
-    dict suitable for plot_map (region → hex color string).
+    Convert an assignment dict (region: number) into one with
+    colors for plot_map visualization (region: hex color string).
 
-    :param assignment: dict[str, str], e.g. {"CA": "1", "NV": "2", …}
+    :assignment: dict[str, str]
+        ex/ {"CA": "1", "NV": "2"}
     '''
     return {region: COLOR_PALETTE.get(color, "#dddddd")
             for region, color in assignment.items()}
 
 
-# ─────────────────────────────────────────────
-#  CSP Problem class
-# ─────────────────────────────────────────────
 
+# CSP Class
 class MapColoringProblem:
     '''
-    Encapsulates a map-coloring CSP.
+    Defines a map-coloring CSP.
 
     Attributes
     ----------
@@ -248,46 +238,50 @@ class MapColoringProblem:
         self.domains    = {v: list(self.colors) for v in self.variables}
         self.backtracks = 0
 
-    # ── constraint check ──────────────────────
+    # constraint check 
     def is_consistent(self, var, color, assignment):
         '''
-        Return True if assigning *color* to *var* does not conflict with
-        any already-assigned neighbor.
+        Checks if a color assignment to a var conflicts with any already
+        assigned variables/regions.
 
-        :param var: variable being assigned
+        :param var: variable/region being assigned
         :param color: candidate color
-        :param assignment: dict of already-assigned variables
+        :param assignment: dict of already-assigned variables/regions
         '''
         for neighbor in self.neighbors[var]:
             if assignment.get(neighbor) == color:
                 return False
         return True
+    
 
-    # ── forward checking ──────────────────────
-    def forward_check(self, var, color, domains):
+    def forward_check(self, var, color, domains, assignment):
         '''
-        Remove *color* from every unassigned neighbor's domain.
-        Returns False if any domain becomes empty (dead end).
+        Remove a color from every unassigned neighbor's domain.
+        If any neighbor ends up with no valid colors left, return False.
 
-        :param var: variable just assigned
+        :param var: variable/region just assigned
         :param color: color just assigned to var
         :param domains: mutable copy of current domains
+        :param assignment: list of all assignments
         '''
         for neighbor in self.neighbors[var]:
-            if color in domains[neighbor]:
+            if neighbor not in assignment and color in domains[neighbor]:
                 domains[neighbor].remove(color)
-                if not domains[neighbor]:
-                    return False    # domain wipe-out
-        return True
 
-    # ── singleton propagation (AC-1 style) ────
+                if not domains[neighbor]:
+                    return False   
+        return True
+    
+    
     def propagate_singletons(self, domains):
         '''
-        Repeatedly enforce arc-consistency for singleton domains.
-        When a variable has only one color left, remove that color from
-        all its neighbors.  Continue until stable or a wipe-out occurs.
+        Keep enforcing constraints for variables/regions that only have one
+        possible color left.
 
-        Returns False on domain wipe-out, True otherwise.
+        If a variable is forced to a single color, remove that color
+        from its neighbors. Repeat until nothing changes.
+
+        Returns False if any domain becomes empty, otherwise True.
 
         :param domains: mutable copy of current domains
         '''
@@ -295,31 +289,36 @@ class MapColoringProblem:
         while changed:
             changed = False
             for var in self.variables:
+                # For each variable/region, check if theres only one color in the domain   
                 if len(domains[var]) == 1:
                     forced_color = domains[var][0]
+                    # Remove that one color from the domains of other neighboard
                     for neighbor in self.neighbors[var]:
                         if forced_color in domains[neighbor]:
                             domains[neighbor].remove(forced_color)
                             changed = True
+
+                            # If empty domain
                             if not domains[neighbor]:
-                                return False    # domain wipe-out
+                                return False 
         return True
 
-    # ── heuristic helpers ─────────────────────
+    # HEURISTICS
     def mrv(self, unassigned, domains):
         '''
-        Minimum Remaining Values: pick the variable with the fewest
-        legal colors remaining in its domain.
+        Minimum Remaining Values
+        Picks the variable with the fewest remaining color options.
 
         :param unassigned: list of not-yet-assigned variables
         :param domains: current domains dict
         '''
         return min(unassigned, key=lambda v: len(domains[v]))
 
+
     def degree(self, unassigned):
         '''
-        Degree heuristic: among tied variables, prefer the one with the
-        most constraints on remaining unassigned variables.
+        Degree heuristic
+        Picks the variable connected to the most other unassigned variables.
 
         :param unassigned: list of not-yet-assigned variables
         '''
@@ -328,12 +327,14 @@ class MapColoringProblem:
                    key=lambda v: sum(1 for n in self.neighbors[v]
                                      if n in unassigned_set))
 
+
     def lcv(self, var, domains, assignment):
         '''
-        Least Constraining Value: order *var*'s colors so that the color
-        ruling out the fewest neighbor choices comes first.
+        Least Constraining Value
+        Order var (colors) such that those in the least domains 
+        (least restrictive) come first.        
 
-        :param var: variable being assigned
+        :param var: region/variable being assigned
         :param domains: current domains dict
         :param assignment: current partial assignment
         '''
@@ -344,21 +345,22 @@ class MapColoringProblem:
             )
         return sorted(domains[var], key=count_conflicts)
 
+
     def select_unassigned_variable(self, unassigned, domains, use_heuristics):
         '''
-        Choose the next variable to assign.
+        Choose the next region/variable to assign.
 
-        With heuristics: MRV first, break ties with Degree.
-        Without: return the next variable in the preset order.
+        With heuristics: use mrv, break ties with degree.
+        Without: return the next region/variable in the preset order.
 
-        :param unassigned: ordered list of unassigned variables
-        :param domains: current domains dict
+        :param unassigned: ordered list of unassigned regions/variables
+        :param domains: current domains/possible colors dict
         :param use_heuristics: bool
         '''
         if not use_heuristics:
             return unassigned[0]
 
-        min_domain     = min(len(domains[v]) for v in unassigned)
+        min_domain = min(len(domains[v]) for v in unassigned)
         mrv_candidates = [v for v in unassigned if len(domains[v]) == min_domain]
 
         if len(mrv_candidates) == 1:
@@ -366,73 +368,86 @@ class MapColoringProblem:
 
         return self.degree(mrv_candidates)  # tie-break
 
+
     def order_domain_values(self, var, domains, assignment, use_heuristics):
         '''
-        Return the colors to try for *var*, in order.
+        Decide what order to try var (colors) for a variable/region.
 
         With heuristics: LCV ordering.
         Without: domain as-is.
 
-        :param var: variable being assigned
+        :param var: region/variable being assigned
         :param domains: current domains dict
         :param assignment: current partial assignment
         :param use_heuristics: bool
         '''
         if use_heuristics:
             return self.lcv(var, domains, assignment)
+        
         return list(domains[var])
 
 
-# ─────────────────────────────────────────────
-#  Backtracking search
-# ─────────────────────────────────────────────
 
 def backtrack(problem, assignment, unassigned, domains,
               use_fc, use_propagation, use_heuristics):
     '''
-    Core recursive backtracking search shared by all six algorithm variants.
+    Recursive backtracking search.
+
+    Tries assigning values(colors) to variables(regions) one at a time, and
+    backtracks when a conflict or dead end is reached.
 
     :param problem: MapColoringProblem instance
-    :param assignment: dict mapping variable → color (mutated in place)
-    :param unassigned: list of variables not yet assigned
+    :param assignment: dict mapping region:color
+    :param unassigned: list of variables/regions not yet assigned
     :param domains: dict of current legal colors per variable
     :param use_fc: enable forward checking
     :param use_propagation: enable singleton-domain propagation
     :param use_heuristics: enable MRV / Degree / LCV heuristics
     '''
-    if not unassigned:
-        return assignment   # complete assignment found
+    if not unassigned: # If unassaigned list is empty, the assignment is complete
+        return assignment
 
-    var       = problem.select_unassigned_variable(unassigned, domains, use_heuristics)
+    # Select the next region to be assigned and take it out of the remaining list
+    var = problem.select_unassigned_variable(unassigned, domains, use_heuristics)
     remaining = [v for v in unassigned if v != var]
 
+    # Order colors in the domain depending on heuristics and assign them to 
+    # variables selected.
     for color in problem.order_domain_values(var, domains, assignment, use_heuristics):
         if problem.is_consistent(var, color, assignment):
             assignment[var] = color
+            domains[var] = [color]
 
-            # Snapshot domains before modification so we can restore on failure
+            # Save domains before modification so we can restore on failure
             saved_domains = {v: list(d) for v, d in domains.items()}
             ok = True
 
-            if use_fc:
-                ok = problem.forward_check(var, color, domains)
+            if use_fc: # Checking if assignment passes the forward check
+                ok = problem.forward_check(var, color, domains, assignment)
+        
 
-            if ok and use_propagation:
+            if ok and use_propagation: # Checking if singletons cause failure
                 ok = problem.propagate_singletons(domains)
 
+             # If fc+singleton pass/aren't used, regressively assign color to the next region
             if ok:
                 result = backtrack(problem, assignment, remaining, domains,
                                    use_fc, use_propagation, use_heuristics)
+                
+                # Passing the completed assignment to the caller
                 if result is not None:
                     return result
 
+            # The color assignment failed to meet constraints, backtrack
             # Restore domains and undo assignment
             for v in domains:
                 domains[v] = saved_domains[v]
+
             del assignment[var]
+
             problem.backtracks += 1
 
-    return None     # signal backtrack to caller
+    return None # signal backtrack to caller
 
 
 def solve(neighbors, num_colors, variable_order,
@@ -449,26 +464,22 @@ def solve(neighbors, num_colors, variable_order,
     :param use_propagation: enable singleton propagation
     :param use_heuristics: enable MRV / Degree / LCV heuristics
     '''
-    problem          = MapColoringProblem(neighbors, num_colors)
+    problem = MapColoringProblem(neighbors, num_colors)
     problem.variables = list(variable_order)
-    domains          = {v: list(problem.colors) for v in problem.variables}
+    domains = {v: list(problem.colors) for v in problem.variables}
 
-    start      = time.perf_counter()
+    start = time.perf_counter()
     assignment = backtrack(problem, {}, list(problem.variables), domains,
                            use_fc, use_propagation, use_heuristics)
-    elapsed    = time.perf_counter() - start
+    elapsed = (time.perf_counter() - start) * 1000 # ms
 
     return assignment, problem.backtracks, elapsed
 
 
-# ─────────────────────────────────────────────
-#  Chromatic-number helper
-# ─────────────────────────────────────────────
-
 def find_chromatic_number(neighbors, max_colors=10):
     '''
     Find the minimum number of colors needed to legally color the graph
-    by trying increasing color counts until a solution is found.
+    by increasing color counts until a solution is found.
 
     :param neighbors: adjacency dict
     :param max_colors: upper bound before giving up
@@ -483,10 +494,8 @@ def find_chromatic_number(neighbors, max_colors=10):
     return None
 
 
-# ─────────────────────────────────────────────
-#  Experiment runner and result printer
-# ─────────────────────────────────────────────
 
+# Run experiement and print results
 ALGORITHM_LABELS = ["DFS only", "DFS + FC", "DFS + FC + Prop"]
 
 
@@ -519,8 +528,8 @@ def run_experiments(neighbors, map_name, num_colors, num_trials=5):
         ]),
     ]:
         print(f"\n── {section_label} ──")
-        print(f"{'Trial':<7} | {'Algorithm':<20} | {'Backtracks':>10} | {'Time (s)':>10}")
-        print(f"{'-'*7}-+-{'-'*20}-+-{'-'*10}-+-{'-'*10}")
+        print(f"{'Trial':<7} | {'Algorithm':<20} | {'Backtracks':>10} | {'Time (ms)':>10}")
+        print(f"{'-'*7}-+-{'-'*20}-+-{'-'*10}-+-{'-'*20}")
 
         for trial in range(1, num_trials + 1):
             random.shuffle(variables)
@@ -529,53 +538,69 @@ def run_experiments(neighbors, map_name, num_colors, num_trials=5):
             for label, (fc, prop, heur) in zip(ALGORITHM_LABELS, configs):
                 assignment, bt, t = solve(neighbors, num_colors, order, fc, prop, heur)
                 status = "✓" if assignment else "✗"
-                print(f"{trial:<7} | {label:<20} | {bt:>10} | {t:>10.5f}  {status}")
+                print(f"{trial:<7} | {label:<20} | {bt:>10} | {t:>10.5f} ms  {status}")
 
-            print(f"{'-'*7}-+-{'-'*20}-+-{'-'*10}-+-{'-'*10}")
+            print(f"{'-'*7}-+-{'-'*20}-+-{'-'*10}-+-{'-'*20}")
 
 
 def print_coloring(assignment, map_name):
     '''
-    Pretty-print a coloring assignment to the terminal.
+    Print a coloring assignment to the terminal.
 
     :param assignment: dict mapping region → color-number string
     :param map_name: label shown in the header
     '''
+    # Group states by color
+    color_groups = defaultdict(list)
+    for region, color in assignment.items():
+        color_groups[color].append(region)
+
+    # Sort colors numerically ("1", "2", ...)
+    sorted_colors = sorted(color_groups.keys(), key=int)
+
     print(f"\n{map_name} coloring:")
-    for region, color in sorted(assignment.items()):
-        print(f"  {region:<5} → color {color}")
+    print(f"{'Color':<10} | States")
+    print(f"{'-'*10}-+-{'-'*60}")
+
+    for color in sorted_colors:
+        states = sorted(color_groups[color])
+        state_str = ", ".join(states)
+        print(f"{color:<10} | {state_str}")
 
 
-# ─────────────────────────────────────────────
-#  Entry point
-# ─────────────────────────────────────────────
+
 
 if __name__ == "__main__":
     random.seed(42)
 
-    # ── Chromatic numbers ─────────────────────
-    print("Computing chromatic numbers …")
-    chi_usa = find_chromatic_number(USA_NEIGHBORS)
-    print(f"  USA chromatic number  χ(G) = {chi_usa}")
+    with open("experiment_results.txt", "w", encoding="utf-8") as f:
+        sys.stdout = f   # Print everything to a txt file
+        
+        # Get chromatic numbers from US and AU
+        print("Computing chromatic numbers …")
+        chi_usa = find_chromatic_number(USA_NEIGHBORS)
+        print(f"  USA chromatic number  χ(G) = {chi_usa}")
 
-    chi_au = find_chromatic_number(AU_NEIGHBORS)
-    print(f"  Australia chromatic number  χ(G) = {chi_au}")
+        chi_au = find_chromatic_number(AU_NEIGHBORS)
+        print(f"  Australia chromatic number  χ(G) = {chi_au}")
 
-    # ── Experiments ───────────────────────────
-    # chi + 1 keeps every trial tractable while still exercising all variants
-    run_experiments(USA_NEIGHBORS, "USA MAP",       chi_usa + 1, num_trials=5)
-    run_experiments(AU_NEIGHBORS,  "AUSTRALIA MAP", chi_au,      num_trials=5)
+        # Run experiements on each map
+        # chi + 1 keeps every trial tractable while still exercising all variants
+        run_experiments(USA_NEIGHBORS, "USA MAP", chi_usa + 1, num_trials=10)
+        run_experiments(AU_NEIGHBORS, "AUSTRALIA MAP", chi_au + 1, num_trials=10)
 
-    # ── Solve once for visualization ──────────
-    usa_sol, _, _ = solve(USA_NEIGHBORS, chi_usa + 1, list(USA_NEIGHBORS.keys()),
-                          use_fc=True, use_propagation=True, use_heuristics=True)
-    au_sol,  _, _ = solve(AU_NEIGHBORS,  chi_au,      list(AU_NEIGHBORS.keys()),
-                          use_fc=True, use_propagation=True, use_heuristics=True)
+        # Solve once for visualization
+        usa_sol, _, _ = solve(USA_NEIGHBORS, chi_usa, list(USA_NEIGHBORS.keys()),
+                            use_fc=True, use_propagation=True, use_heuristics=True)
+        au_sol,  _, _ = solve(AU_NEIGHBORS, chi_au, list(AU_NEIGHBORS.keys()),
+                            use_fc=True, use_propagation=True, use_heuristics=True)
 
-    if usa_sol:
-        print_coloring(usa_sol, "USA")
-        plot_map("us",  assignment_to_hex_coloring(usa_sol))
+        if usa_sol:
+            print_coloring(usa_sol, "USA")
+            plot_map("us",  assignment_to_hex_coloring(usa_sol))
 
-    if au_sol:
-        print_coloring(au_sol, "Australia")
-        plot_map("au",  assignment_to_hex_coloring(au_sol))
+        if au_sol:
+            print_coloring(au_sol, "Australia")
+            plot_map("au",  assignment_to_hex_coloring(au_sol))
+
+    sys.stdout = sys.__stdout__  # restore normal printing

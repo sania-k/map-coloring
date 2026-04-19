@@ -7,4 +7,6 @@ To run, first download libraries from `requirements.txt`
 pip install requirements.txt
 ```
 
-To run, download `puzzle.py` and run via terminal with `python puzzle.py`
+Then, can be run in terminal with `python map_coloring.py`
+
+Results will be printed to `experiemnt_results.txt`, and the related maps will be saved in `[country]_map.png`
